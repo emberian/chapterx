@@ -1201,3 +1201,114 @@ describe('splitPreservingMarkdown — cross-send continuity', () => {
     expect(exclusiveOnly(r.endCarry)).toEqual([]) // emphasis does not cross a send
   })
 })
+
+// ---------------------------------------------------------------------------
+// 12. Regression: fuzz-found defects
+// ---------------------------------------------------------------------------
+
+/** Run-merging delimiter chars (backslash escapes, so it is excluded). */
+const SEAM_CHARS = new Set(['`', '~', '*', '_', '|'])
+
+/** Strip the bridges from a chunk to recover its original body slice. */
+function bodyOf(c: ChunkPiece): string {
+  let t = c.text
+  if (c.bridgeOpen && t.startsWith(c.bridgeOpen)) t = t.slice(c.bridgeOpen.length)
+  if (c.bridgeClose && t.endsWith(c.bridgeClose)) t = t.slice(0, t.length - c.bridgeClose.length)
+  return t
+}
+
+/**
+ * Assert no chunk fuses a synthetic bridge with an identical delimiter run in
+ * the adjacent body (defect 2): the reopener's last char must differ from the
+ * body's first char, and the closer's first char from the body's last char.
+ */
+function assertNoSeamMerge(chunks: ChunkPiece[]): void {
+  for (const c of chunks) {
+    const body = bodyOf(c)
+    if (!body.length) continue
+    if (c.bridgeOpen) {
+      const last = c.bridgeOpen[c.bridgeOpen.length - 1]!
+      if (SEAM_CHARS.has(last)) expect(last).not.toBe(body[0])
+    }
+    if (c.bridgeClose) {
+      const first = c.bridgeClose[0]!
+      if (SEAM_CHARS.has(first)) expect(first).not.toBe(body[body.length - 1])
+    }
+  }
+}
+
+describe('splitPreservingMarkdown — defect 1: giant fence reopener', () => {
+  it('does not exceed maxLength when a fence with a long opening line straddles a cut', () => {
+    const text =
+      '~~~tyttykittykittykittykittyboundary ipsum_kittyprobe ____***日本語 lorem semicoloony' +
+      'kitty'.repeat(43) +
+      'kit|kitty the**bold**the _x |||ipsum probe \\*~the*i*naïve kitty lorem sem\nn'
+    const r = splitPreservingMarkdown(text, 300)
+    assertAllWithinLimit(r.chunks, 300)
+    expect(reconstruct(r.chunks)).toBe(text)
+  })
+
+  it('reopens a long-info fence with just the marker + first info word (not the whole line)', () => {
+    const opener = '```' + 'averylongfirstword'.repeat(6) + ' rest of the info string here'
+    const body = 'code line\n'.repeat(40)
+    const text = opener + '\n' + body + '```'
+    const r = splitPreservingMarkdown(text, 120)
+    assertAllWithinLimit(r.chunks, 120)
+    expect(reconstruct(r.chunks)).toBe(text)
+    // Any fence reopener is the marker + a single info word, never the verbatim line.
+    for (const c of r.chunks) {
+      if (c.bridgeOpen && c.bridgeOpen.startsWith('```')) {
+        expect(c.bridgeOpen).not.toContain(' ')
+        expect(c.bridgeOpen.length).toBeLessThan(opener.length)
+      }
+    }
+  })
+
+  it('hard-guarantees invariant A across small maxLengths for a pathological fence', () => {
+    const text = '~~~' + 'infoword'.repeat(30) + '\n' + 'x'.repeat(400) + '\ntail'
+    for (const maxLength of [60, 80, 120, 300]) {
+      const r = splitPreservingMarkdown(text, maxLength)
+      assertAllWithinLimit(r.chunks, maxLength)
+      expect(reconstruct(r.chunks)).toBe(text)
+    }
+  })
+})
+
+describe('splitPreservingMarkdown — defect 2: bridge/body delimiter-run merge at the seam', () => {
+  it('(a) reopened inline code does not fuse with a leading body backtick', () => {
+    const text = 'he a `\n`x' + 'kitty'.repeat(14) + 'k '
+    const r = splitPreservingMarkdown(text, 80)
+    assertAllWithinLimit(r.chunks, 80)
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertNoSeamMerge(r.chunks)
+    // No chunk starts a spurious double-backtick run from bridge + body.
+    for (const c of r.chunks) expect(c.text).not.toContain('``x')
+  })
+
+  it('(b) strike closer does not fuse with a trailing opener to form ~~~~', () => {
+    const text = 'x ipsum ' + 'kitty'.repeat(5) + '**a~~s~~'
+    const r = splitPreservingMarkdown(text, 40)
+    assertAllWithinLimit(r.chunks, 40)
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertNoSeamMerge(r.chunks)
+    for (const c of r.chunks) expect(c.text).not.toContain('~~~~')
+  })
+
+  it('(c) backtick runs do not merge on either side of a seam', () => {
+    const text = 'um `code`_~~~````\n`_lm' + 'lorem'.repeat(60)
+    const r = splitPreservingMarkdown(text, 200)
+    assertAllWithinLimit(r.chunks, 200)
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertNoSeamMerge(r.chunks)
+  })
+
+  it('final chunk does not fuse an inline-code closer with trailing body backticks', () => {
+    // Unclosed inline code whose original content ends in backticks: Discord
+    // already renders it literally, so the final chunk leaves it open rather
+    // than emitting a closer that would fuse into a longer backtick run.
+    const text = '**bold**``````the lorem ' + 'ipsum'.repeat(50) + '**bold**```'
+    const r = splitPreservingMarkdown(text, 2000)
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertNoSeamMerge(r.chunks)
+  })
+})

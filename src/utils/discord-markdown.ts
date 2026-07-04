@@ -490,12 +490,31 @@ export function closeMarks(stack: MarkdownCarry): string {
   return out
 }
 
+/**
+ * A fence's reopener body: the marker run plus at most the first
+ * whitespace-delimited word of the info string (the language tag), optionally
+ * truncated to `infoBudget` chars. Replaying the entire verbatim opening line
+ * is unnecessary — Discord only consumes the first token for syntax
+ * highlighting — and a long info string would otherwise blow past maxLength
+ * when the fence straddles a cut. Truncating the tag only affects the synthetic
+ * reopener (a bridge that is stripped on reconstruction), never the body, so
+ * losslessness is preserved.
+ */
+function fenceReopener(opener: string, infoBudget = Infinity): string {
+  const { char, runLen } = parseFenceMarker(opener)
+  const marker = char.repeat(runLen)
+  const info = opener.slice(marker.length)
+  const firstWord = info.trimStart().split(/\s/)[0] ?? ''
+  const budget = Math.max(0, infoBudget)
+  return marker + (firstWord.length > budget ? firstWord.slice(0, budget) : firstWord)
+}
+
 /** Reopening delimiters for an open stack, outermost first. */
 export function reopenMarks(stack: MarkdownCarry): string {
   let out = ''
   for (const mark of stack) {
     if (mark.kind === 'fence') {
-      out += mark.opener + '\n'
+      out += fenceReopener(mark.opener) + '\n'
     } else {
       out += mark.opener
     }
@@ -553,9 +572,30 @@ export function splitPreservingMarkdown(
   let chunkStart = 0
   let inherited: OpenMark[] = startCarry.slice()
 
-  const pushChunk = (endPos: number, closeStack: OpenMark[]): void => {
+  // Reopener for an inherited stack, with a fence's info-string tail capped so
+  // the reopener can never, on its own, crowd out maxLength. A fence is
+  // exclusive (the sole stack entry when active); the room we must leave is its
+  // own closer (marker + newline) plus at least one body char. This is what
+  // makes invariant A (chunk.text.length <= maxLength) a hard guarantee even
+  // when the original opening line is pathologically long. Emphasis openers are
+  // tiny and never capped.
+  const reopenerFor = (stack: OpenMark[]): string => {
+    let out = ''
+    for (const mark of stack) {
+      if (mark.kind === 'fence') {
+        const { runLen } = parseFenceMarker(mark.opener)
+        // marker + info + '\n' (reopener) and marker + '\n' (closer) and 1 body.
+        const infoBudget = maxLength - runLen - 1 - (runLen + 1) - 1
+        out += fenceReopener(mark.opener, infoBudget) + '\n'
+      } else {
+        out += mark.opener
+      }
+    }
+    return out
+  }
+
+  const pushChunk = (endPos: number, closeStack: OpenMark[], bridgeOpen: string): void => {
     const body = text.slice(chunkStart, endPos)
-    const bridgeOpen = inherited.length ? reopenMarks(inherited) : ''
     const bridgeClose = closeStack.length ? closeMarksForBody(body, closeStack) : ''
     chunks.push({
       text: bridgeOpen + body + bridgeClose,
@@ -566,8 +606,46 @@ export function splitPreservingMarkdown(
     inherited = closeStack
   }
 
+  // Delimiter chars whose runs merge when concatenated (backslash excluded — it
+  // escapes rather than forming a run).
+  const isRunChar = (ch: string | undefined): boolean =>
+    ch === '`' || ch === '~' || ch === '*' || ch === '_' || ch === '|'
+
+  // Does a NON-fence bridgeable construct's content span cross `pos`? Bridging
+  // an inline construct (inline code / emphasis) across a cut abuts its
+  // delimiter with the body and can fuse delimiter runs at the seam; a newline
+  // that lands inside such a construct also needlessly fragments a small span.
+  // Fences are exempt — straddling them at a newline is exactly how they bridge,
+  // and their newline-anchored markers never fuse.
+  const straddlesNonFence = (pos: number): boolean =>
+    bridgeable.some((c) => c.kind !== 'fence' && c.contentStart <= pos && pos <= c.contentEnd)
+
+  // Would emitting this chunk (body = text[chunkStart, cut], closed by
+  // `closeStack`) and reopening `closeStack` in the next chunk fuse a synthetic
+  // bridge string with an identical run char in the adjacent body, changing how
+  // Discord parses the seam? Fences are newline-delimited so they never fuse.
+  const seamMerges = (cut: number, closeStack: OpenMark[], isLast: boolean): boolean => {
+    const body = text.slice(chunkStart, cut)
+    if (body.length === 0) return false
+    const closer = closeStack.length ? closeMarksForBody(body, closeStack) : ''
+    // (ii) synthetic closer starts with the run char the body ends with.
+    if (closer && isRunChar(closer[0]) && closer[0] === body[body.length - 1]) return true
+    if (isLast) return false
+    // (i) reopener (inherited by the next chunk) ends with the run char the next
+    // chunk's body starts with.
+    const reopener = reopenerFor(closeStack)
+    if (
+      reopener &&
+      isRunChar(reopener[reopener.length - 1]) &&
+      reopener[reopener.length - 1] === text[cut]
+    )
+      return true
+    return false
+  }
+
   while (chunkStart < text.length) {
-    const reopenLen = reopenMarks(inherited).length
+    const reopen = inherited.length ? reopenerFor(inherited) : ''
+    const reopenLen = reopen.length
 
     // Pick a cut whose real size (reopener + body + the closers for constructs
     // open AT THE CUT) fits maxLength. Shrink from the largest feasible end,
@@ -583,13 +661,21 @@ export function splitPreservingMarkdown(
         // Final chunk: close only exclusive constructs (emphasis stays literal).
         closeStack = exclusiveOnly(stackAt(text.length))
       } else {
-        // Prefer a newline within (chunkStart, end]; keep it at this chunk's end
-        // so reconstruction is exact. Otherwise hard-split without bisecting a
-        // delimiter run.
+        // Prefer the latest newline within (chunkStart, end] that does not land
+        // inside a non-fence construct (which would fragment it and risk a seam
+        // merge); keep it at this chunk's end so reconstruction is exact.
+        // Otherwise hard-split without bisecting a delimiter run.
         const body = text.slice(chunkStart, end)
-        const lastNl = body.lastIndexOf('\n')
-        if (lastNl >= 0) {
-          cut = chunkStart + lastNl + 1
+        let nlCut = -1
+        for (let nl = body.lastIndexOf('\n'); nl >= 0; nl = nl > 0 ? body.lastIndexOf('\n', nl - 1) : -1) {
+          const candidate = chunkStart + nl + 1
+          if (!straddlesNonFence(candidate)) {
+            nlCut = candidate
+            break
+          }
+        }
+        if (nlCut >= 0) {
+          cut = nlCut
         } else {
           cut = avoidDelimiterBisect(end, bridgeable, chunkStart)
           if (cut <= chunkStart) cut = end
@@ -605,8 +691,35 @@ export function splitPreservingMarkdown(
     }
 
     if (cut < 0) cut = chunkStart + 1
-    const isLast = cut >= text.length
-    pushChunk(cut, closeStack)
+    let isLast = cut >= text.length
+
+    // Final chunk: if closing the dangling exclusive construct would fuse its
+    // closer with a trailing delimiter run in the body (e.g. inline code whose
+    // content ends in backticks), leave it open. It is unclosed in the original
+    // — which Discord already renders literally — and there is no more body in
+    // this call, so leaving it open both avoids the seam and matches the
+    // original rendering. endCarry still reports it for cross-call continuation.
+    if (isLast && closeStack.length && seamMerges(cut, closeStack, true)) {
+      closeStack = []
+    }
+
+    // Avoid a seam that would fuse a bridge string with a same-char delimiter run
+    // in the adjacent body (which merges runs and changes parsing). Pull the cut
+    // left — off the offending delimiter and out of any construct it straddled —
+    // until the seam clears. A smaller body only shrinks the fit, so invariant A
+    // still holds. Monotonic (cut strictly decreases) so it always terminates.
+    if (!isLast) {
+      let guard = 0
+      while (cut > chunkStart + 1 && seamMerges(cut, closeStack, isLast) && guard++ <= text.length) {
+        let next = avoidDelimiterBisect(cut - 1, bridgeable, chunkStart)
+        if (next <= chunkStart) next = cut - 1
+        cut = next
+        isLast = cut >= text.length
+        closeStack = isLast ? exclusiveOnly(stackAt(text.length)) : stackAt(cut)
+      }
+    }
+
+    pushChunk(cut, closeStack, reopen)
     if (isLast) break
   }
 
