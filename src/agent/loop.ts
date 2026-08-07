@@ -13,6 +13,7 @@ import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
+import { exclusiveOnly, type MarkdownCarry } from '../utils/discord-markdown.js'
 import { 
   withTrace, 
   TraceCollector, 
@@ -419,74 +420,70 @@ export class AgentLoop {
   }
   
   /**
-   * Send segments to Discord, preserving invisible content associations.
-   * Each segment's visible text is sent as a Discord message (may be chunked if >2000 chars).
-   * Returns all sent message IDs and their context (prefix/suffix).
-   * 
-   * For segments with no visible text (phantom), the invisible content is stored
-   * as suffix of the previous message, or returned as orphanedInvisible if no messages sent.
+   * Send segments to Discord, preserving invisible content associations and
+   * keeping markdown constructs intact across message boundaries.
+   *
+   * Each segment's visible text is sent via connector.sendSegmentChunks, which
+   * may split it into MULTIPLE Discord messages when it is long (Discord caps at
+   * 2000 chars). The segment prefix is recorded on the first of those messages
+   * and the suffix on the last; middle messages get empty context.
+   *
+   * Markdown constructs are kept intact: a construct open at a chunk boundary is
+   * closed in one message and reopened in the next. `markdownCarry` continues a
+   * construct inherited from a previous send; `endCarry` reports the open
+   * construct after the last message. Only exclusive constructs (fence/inline)
+   * cross a send boundary — dangling emphasis is left literal. Synthetic
+   * close/reopen strings are recorded on MessageContext (bridgeOpen/bridgeClose)
+   * so they can be stripped during context reconstruction.
+   *
+   * Phantom segments (invisible content only, no visible text) are skipped, with
+   * `markdownCarry` threaded through unchanged. Note that `parseIntoSegments`
+   * already folds leading/trailing invisible content into a neighbouring
+   * segment's prefix/suffix, so phantom segments are not normally produced.
    */
   private async sendSegments(
     channelId: string,
     segments: ContentSegment[],
-    replyToMessageId?: string
+    replyToMessageId: string | undefined,
+    markdownCarry: MarkdownCarry
   ): Promise<{
     sentMessageIds: string[]
     messageContexts: Record<string, MessageContext>
-    orphanedInvisible: string  // Invisible content with no message to attach to
+    endCarry: MarkdownCarry  // Open exclusive construct after the last message
   }> {
     const sentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
-    let orphanedInvisible = ''
-    
-    for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i]!
-      
-      // Send this segment's visible text
-      const msgIds = await this.connector.sendMessage(
-        channelId,
-        segment.visible,
-        i === 0 ? replyToMessageId : undefined  // Only reply on first segment
+    let carry = markdownCarry
+    let replyConsumed = false
+
+    for (const segment of segments) {
+      // Phantom segment (invisible only): nothing to send, carry passes through.
+      if (!segment.visible) continue
+
+      // The connector resolves mentions/emojis, then markdown-splits once and
+      // returns one record per sent message (with its bridge strings). Only
+      // exclusive constructs continue across the boundary.
+      const replyTo = replyConsumed ? undefined : replyToMessageId
+      const { chunks, endCarry } = await this.connector.sendSegmentChunks(
+        channelId, segment.visible, replyTo, carry
       )
-      
-      // Track message IDs
-      sentMessageIds.push(...msgIds)
-      msgIds.forEach(id => this.botMessageIds.add(id))
-      
-      if (msgIds.length > 0) {
-        // First message of this segment gets the prefix
-        const firstMsgId = msgIds[0]!
-        messageContexts[firstMsgId] = { prefix: segment.prefix }
-        
-        // Middle messages get empty context
-        for (let j = 1; j < msgIds.length - 1; j++) {
-          messageContexts[msgIds[j]!] = { prefix: '' }
-        }
-        
-        // Last message (if different from first) - will get suffix if present
-        const lastMsgId = msgIds[msgIds.length - 1]!
-        if (lastMsgId !== firstMsgId) {
-          messageContexts[lastMsgId] = { prefix: '' }
-        }
-        
-        // If this segment has a suffix, add it to the last message
-        if (segment.suffix) {
-          const existing = messageContexts[lastMsgId]
-          messageContexts[lastMsgId] = { 
-            prefix: existing?.prefix ?? '',
-            suffix: segment.suffix 
-          }
-        }
+      carry = exclusiveOnly(endCarry)
+      if (chunks.length > 0) replyConsumed = true
+
+      for (let ci = 0; ci < chunks.length; ci++) {
+        const ch = chunks[ci]!
+        sentMessageIds.push(ch.id)
+        this.botMessageIds.add(ch.id)
+
+        const ctx: MessageContext = { prefix: ci === 0 ? segment.prefix : '' }
+        if (ch.bridgeOpen) ctx.bridgeOpen = ch.bridgeOpen
+        if (ch.bridgeClose) ctx.bridgeClose = ch.bridgeClose
+        if (ci === chunks.length - 1 && segment.suffix) ctx.suffix = segment.suffix
+        messageContexts[ch.id] = ctx
       }
     }
-    
-    // If we have orphaned invisible (from phantom segments at the start), track it
-    // This shouldn't happen often, but handle it for completeness
-    if (segments.length === 0) {
-      // Caller should handle this case - no visible content at all
-    }
-    
-    return { sentMessageIds, messageContexts, orphanedInvisible }
+
+    return { sentMessageIds, messageContexts, endCarry: carry }
   }
 
   private async processBatch(events: Event[]): Promise<void> {
@@ -2111,6 +2108,13 @@ export class AgentLoop {
             [],
             []
           )
+          // Persist per-message context (prefix/suffix + markdown bridge strings)
+          // for any text sent alongside the image, matching the normal path.
+          if (inlineMessageContexts) {
+            for (const [msgId, contextChunk] of Object.entries(inlineMessageContexts)) {
+              this.activationStore.setMessageContext(activation.id, msgId, contextChunk)
+            }
+          }
           await this.activationStore.completeActivation(activation.id)
         }
 
@@ -2500,6 +2504,9 @@ export class AgentLoop {
     const messageContexts: Record<string, MessageContext> = {}
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     let accumulatedPreToolText = ''
+    // Open markdown construct carried across this activation's messages
+    // (pre-tool flushes + final send).
+    let markdownCarry: MarkdownCarry = []
 
     // Set up TTS streaming context if relay is enabled and connected
     if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
@@ -2583,8 +2590,10 @@ export class AgentLoop {
             const sendResult = await this.sendSegments(
               channelId,
               segments,
-              allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+              allSentMessageIds.length === 0 ? triggeringMessageId : undefined,
+              markdownCarry
             )
+            markdownCarry = sendResult.endCarry
             allSentMessageIds.push(...sendResult.sentMessageIds)
             for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
               messageContexts[msgId] = ctx
@@ -2789,8 +2798,10 @@ export class AgentLoop {
           const sendResult = await this.sendSegments(
             channelId,
             segments,
-            allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+            allSentMessageIds.length === 0 ? triggeringMessageId : undefined,
+            markdownCarry
           )
+          markdownCarry = sendResult.endCarry
           allSentMessageIds.push(...sendResult.sentMessageIds)
           for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
             messageContexts[msgId] = ctx
@@ -2919,6 +2930,9 @@ export class AgentLoop {
   }> {
     let accumulatedOutput = ''
     let toolDepth = 0
+    // Open markdown construct carried across this activation's messages
+    // (per-iteration pre-tool flushes + the final send).
+    let markdownCarry: MarkdownCarry = []
     const allToolCallIds: string[] = []
     const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
@@ -3085,6 +3099,7 @@ export class AgentLoop {
             allSentMessageIds,
             messageContexts,
             lastContextEndPos,
+            markdownCarry,
             channelId,
             triggeringMessageId,
             config,
@@ -3121,6 +3136,7 @@ export class AgentLoop {
           allSentMessageIds,
           messageContexts,
           lastContextEndPos,
+          markdownCarry,
           channelId,
           triggeringMessageId,
           config,
@@ -3164,6 +3180,7 @@ export class AgentLoop {
             allSentMessageIds,
             messageContexts,
             lastContextEndPos,
+            markdownCarry,
             channelId,
             triggeringMessageId,
             config,
@@ -3185,8 +3202,10 @@ export class AgentLoop {
         const sendResult = await this.sendSegments(
           channelId,
           segments,
-          toolDepth === 0 ? triggeringMessageId : undefined  // Only reply on first message
+          toolDepth === 0 ? triggeringMessageId : undefined,  // Only reply on first message
+          markdownCarry
         )
+        markdownCarry = sendResult.endCarry
         sentMsgIdsThisRound = sendResult.sentMessageIds
         allSentMessageIds.push(...sentMsgIdsThisRound)
         
@@ -3355,6 +3374,7 @@ export class AgentLoop {
       allSentMessageIds,
       messageContexts,
       lastContextEndPos,
+      markdownCarry,
       channelId,
       triggeringMessageId,
       config,
@@ -3387,6 +3407,7 @@ export class AgentLoop {
     stopReason?: string;
     raw?: unknown;  // Raw provider response from the final LLM call (carries stop_details for refusal categories)
     generatedImageBlocks?: ContentBlock[];  // Image blocks from image generation models
+    markdownCarry: MarkdownCarry;  // Open markdown construct inherited from earlier sends this activation
   }): Promise<{
     completion: any;
     toolCallIds: string[];
@@ -3398,10 +3419,10 @@ export class AgentLoop {
   }> {
     let { accumulatedOutput } = params
     const { 
-      pendingToolPersistence, allToolCallIds, allPreambleMessageIds, 
+      pendingToolPersistence, allToolCallIds, allPreambleMessageIds,
       allSentMessageIds, messageContexts, lastContextEndPos,
       channelId, triggeringMessageId, config, llmRequest, discordMessages,
-      suffix, stopReason, generatedImageBlocks
+      suffix, stopReason, generatedImageBlocks, markdownCarry
     } = params
     
     // 1. Get remaining output (after what was already sent)
@@ -3484,12 +3505,13 @@ export class AgentLoop {
     let actualSentText = ''
     if (segments.length > 0) {
       const sendResult = await this.sendSegments(
-        channelId, 
-        segments, 
-        allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+        channelId,
+        segments,
+        allSentMessageIds.length === 0 ? triggeringMessageId : undefined,
+        markdownCarry
       )
       allSentMessageIds.push(...sendResult.sentMessageIds)
-      
+
       // Merge contexts
       for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
         messageContexts[msgId] = ctx
