@@ -2504,6 +2504,10 @@ export class AgentLoop {
     const messageContexts: Record<string, MessageContext> = {}
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     let accumulatedPreToolText = ''
+    // Membrane's final native response includes all text from every tool round,
+    // including prose already delivered through onPreToolContent. Keep the raw
+    // flushed prefix so the final Discord send can advance past it exactly once.
+    let flushedPreToolText = ''
     // Open markdown construct carried across this activation's messages
     // (pre-tool flushes + final send).
     let markdownCarry: MarkdownCarry = []
@@ -2599,6 +2603,7 @@ export class AgentLoop {
               messageContexts[msgId] = ctx
             }
             // Reset so we don't re-send
+            flushedPreToolText += accumulatedPreToolText
             accumulatedPreToolText = ''
           }
         },
@@ -2724,6 +2729,22 @@ export class AgentLoop {
         .map((c: any) => c.text)
         .join('')
 
+      // onPreToolContent is a preview callback, not a destructive read: the
+      // same text is present at the front of the final aggregate response.
+      // Advance the display cursor past successfully flushed prose. Be
+      // conservative if a future Membrane version changes that contract.
+      let remainingCompletionText = completionText
+      if (flushedPreToolText) {
+        if (completionText.startsWith(flushedPreToolText)) {
+          remainingCompletionText = completionText.slice(flushedPreToolText.length)
+        } else {
+          logger.warn({
+            completionLength: completionText.length,
+            flushedLength: flushedPreToolText.length,
+          }, 'Native tool response did not contain the flushed pre-tool prefix')
+        }
+      }
+
       // Capture generated image blocks (from image generation models like Gemini)
       const generatedImageBlocks: ContentBlock[] = (result?.content || [])
         .filter((c: any) => c.type === 'image')
@@ -2737,6 +2758,9 @@ export class AgentLoop {
       // Strip thinking blocks and tool XML
       const { stripped, content: textThinkingContent } = this.stripThinkingBlocks(
         this.toolSystem.stripToolXml(completionText)
+      )
+      const { stripped: remainingStripped } = this.stripThinkingBlocks(
+        this.toolSystem.stripToolXml(remainingCompletionText)
       )
 
       // Thinking for debug display: structured blocks (native thinking) plus
@@ -2772,6 +2796,7 @@ export class AgentLoop {
 
       // Truncate at participant names
       let displayText = stripped
+      let remainingDisplayText = remainingStripped
       if (discordMessages) {
         const truncResult = this.truncateAtParticipant(
           displayText,
@@ -2784,16 +2809,28 @@ export class AgentLoop {
           logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
           displayText = truncResult.text
         }
+
+        const remainingTruncResult = this.truncateAtParticipant(
+          remainingDisplayText,
+          discordMessages,
+          this.connector.getBotUsername() || config.name,
+          llmRequest.stop_sequences,
+          config
+        )
+        if (remainingTruncResult.truncatedAt) {
+          remainingDisplayText = remainingTruncResult.text
+        }
       }
 
       // Replace mentions
       if (discordMessages) {
         displayText = await this.replaceMentions(displayText, discordMessages)
+        remainingDisplayText = await this.replaceMentions(remainingDisplayText, discordMessages)
       }
 
       // Send remaining text to Discord (text not already sent via onPreToolContent)
-      if (displayText.trim()) {
-        const segments = this.parseIntoSegments(displayText)
+      if (remainingDisplayText.trim()) {
+        const segments = this.parseIntoSegments(remainingDisplayText)
         if (segments.length > 0) {
           const sendResult = await this.sendSegments(
             channelId,
@@ -4041,4 +4078,3 @@ export class AgentLoop {
     )
   }
 }
-
