@@ -14,6 +14,7 @@ import mcpResourcesPlugin from './mcp-resources.js'
 import timerPlugin from './timer.js'
 import characterPlugin from './character.js'
 import sleepPlugin from './sleep.js'
+import workspacePlugin from './workspace.js'
 
 // Register all available plugins
 export const availablePlugins: Record<string, ToolPlugin> = {
@@ -26,9 +27,9 @@ export const availablePlugins: Record<string, ToolPlugin> = {
   'timer': timerPlugin,
   'character': characterPlugin,
   'sleep': sleepPlugin,
+  'workspace': workspacePlugin,
 }
 
 export * from './types.js'
 export * from './state.js'
 export { PluginContextFactory } from './context-factory.js'
-

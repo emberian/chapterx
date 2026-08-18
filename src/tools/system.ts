@@ -589,6 +589,7 @@ export class ToolSystem {
           addReaction: this.pluginContext.addReaction || (async () => {}),
           uploadFile: this.pluginContext.uploadFile,
           visibleImages: this.pluginContext.visibleImages,
+          incomingAttachments: this.pluginContext.incomingAttachments,
         }
         
         let result = await pluginHandler(call.input, context)
@@ -924,4 +925,3 @@ export class ToolSystem {
     }
   }
 }
-

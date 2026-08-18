@@ -25,6 +25,7 @@ import {
 } from '../trace/index.js'
 import { ActivationStore, Activation, TriggerType, MessageContext } from '../activation/index.js'
 import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.js'
+import { collectIncomingAttachments } from '../tools/plugins/workspace.js'
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
@@ -1666,6 +1667,7 @@ export class AgentLoop {
         mimeType: img.mediaType,
         description: img.url ? `cached from ${img.url.split('/').pop()?.slice(0, 20)}` : undefined,
       }))
+      const incomingAttachments = collectIncomingAttachments(discordContext)
       
       // Set plugin context for this activation
       this.toolSystem.setPluginContext({
@@ -1687,6 +1689,7 @@ export class AgentLoop {
           return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
         },
         visibleImages: initialVisibleImages,
+        incomingAttachments,
       })
       endProfile('pluginSetup')
 
@@ -1848,39 +1851,45 @@ export class AgentLoop {
           uploadFile: async (buffer: Buffer, filename: string, contentType: string, caption?: string) => {
             return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
           },
+          incomingAttachments,
         }
         
         // Get injections from all plugins that support it
         for (const [pluginName, plugin] of loadedPlugins) {
-          if (plugin.getContextInjections) {
-            try {
-              // Get plugin-specific config, enriched with recent messages for RAG plugins
-              let pluginInstanceConfig = config.plugin_config?.[pluginName]
-              if (pluginName === 'character' && pluginInstanceConfig) {
-                const recentCount = pluginInstanceConfig.recent_messages || 7
-                const recentMsgs = discordContext.messages.slice(-recentCount)
-                pluginInstanceConfig = {
-                  ...pluginInstanceConfig,
-                  _recentMessages: recentMsgs.map((m: any) => `${m.author?.username || 'unknown'}: ${m.content || ''}`),
-                }
+          try {
+            // Get plugin-specific config, enriched with recent messages for RAG plugins
+            let pluginInstanceConfig = config.plugin_config?.[pluginName]
+            if (pluginName === 'character' && pluginInstanceConfig) {
+              const recentCount = pluginInstanceConfig.recent_messages || 7
+              const recentMsgs = discordContext.messages.slice(-recentCount)
+              pluginInstanceConfig = {
+                ...pluginInstanceConfig,
+                _recentMessages: recentMsgs.map((m: any) => `${m.author?.username || 'unknown'}: ${m.content || ''}`),
               }
-              
-              // Skip disabled plugins (state_scope: 'off')
-              if (pluginInstanceConfig?.state_scope === 'off') {
-                logger.debug({ pluginName }, 'Skipping disabled plugin (state_scope: off)')
-                continue
-              }
-              
-              const stateContext = pluginContextFactory.createStateContext(
-                pluginName,
-                basePluginContext,
-                discordContext.inheritanceInfo,  // Pass inheritance info for state lookup
-                undefined,  // epicReducer
-                pluginInstanceConfig  // Pass plugin config
-              )
+            }
+
+            // Skip disabled plugins (state_scope: off)
+            if (pluginInstanceConfig?.state_scope === 'off') {
+              logger.debug({ pluginName }, 'Skipping disabled plugin (state_scope: off)')
+              continue
+            }
+
+            const stateContext = pluginContextFactory.createStateContext(
+              pluginName,
+              basePluginContext,
+              discordContext.inheritanceInfo,  // Pass inheritance info for state lookup
+              undefined,  // epicReducer
+              pluginInstanceConfig  // Pass plugin config
+            )
+
+            if (plugin.onActivation) {
+              await plugin.onActivation(stateContext)
+            }
+
+            if (plugin.getContextInjections) {
               const injections = await plugin.getContextInjections(stateContext)
               pluginInjections.push(...injections)
-              
+
               if (injections.length > 0) {
                 logger.debug({ 
                   pluginName, 
@@ -1888,9 +1897,9 @@ export class AgentLoop {
                   injectionIds: injections.map(i => i.id),
                 }, 'Got context injections from plugin')
               }
-            } catch (error) {
-              logger.error({ error, pluginName }, 'Failed to get context injections from plugin')
             }
+          } catch (error) {
+            logger.error({ error, pluginName }, 'Failed to run activation lifecycle for plugin')
           }
         }
         

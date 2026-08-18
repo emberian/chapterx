@@ -1,0 +1,46 @@
+# ChapterX autonomy workspace configuration fragment
+#
+# Merge these keys into the bot config. The host only needs to choose and mount
+# `root`; everything else has useful defaults. The bot decides its own directory
+# structure after moving in.
+
+tools_enabled: true
+tool_plugins: ['notes', 'timer', 'workspace']
+
+plugin_config:
+  notes:
+    state_scope: global
+
+  workspace:
+    # REQUIRED FOR CONTAINER DEPLOYMENTS: mount a persistent host directory here.
+    # A publishable web directory can be mounted beneath it as /state/claude/htdocs.
+    root: /state/claude
+
+    # Images and text/code attachments enter inbox/ automatically. Files are
+    # keyed by Discord message + attachment IDs, so repeated context fetches do
+    # not create duplicates.
+    capture_attachments: true
+    capture_all_attachments: false
+    capture_bot_attachments: false
+    max_inbox_file_bytes: 26214400
+    max_inbox_items_per_activation: 8
+
+    # File tools are always available when the plugin is enabled. Shell is an
+    # explicit second step: cwd confinement is not a sandbox, so turn this on
+    # only after the whole ChapterX process is inside a dedicated container,
+    # chroot, or VM with minimal mounts and credentials.
+    allow_shell: false
+    shell: /bin/sh
+    shell_args: ['-lc']
+    shell_timeout_ms: 15000
+    shell_max_output_chars: 64000
+
+    # Only these explicit variables are added to the shell's scrubbed baseline
+    # environment (PATH, locale, HOME, TMPDIR, CHAPTERX_WORKSPACE).
+    shell_env:
+      TZ: America/New_York
+
+# If the runtime has Plan 9 rc installed, the shell stanza can instead be:
+#   allow_shell: true
+#   shell: /bin/rc
+#   shell_args: ['-c']

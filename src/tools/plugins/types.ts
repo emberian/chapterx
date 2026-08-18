@@ -44,6 +44,13 @@ export interface ToolPlugin {
    * Use to set up initial state or inherit from parent.
    */
   onInit?: (context: PluginStateContext) => Promise<void>
+
+  /**
+   * Called once while assembling each activation, before context injections are
+   * collected. Suitable for idempotent maintenance such as importing newly
+   * visible attachments into persistent storage.
+   */
+  onActivation?: (context: PluginStateContext) => Promise<void>
 }
 
 export interface PluginTool {
@@ -75,6 +82,26 @@ export interface VisibleImage {
   description?: string
 }
 
+/** An attachment discovered in the Discord history for this activation. */
+export interface IncomingAttachment {
+  id: string
+  messageId: string
+  channelId: string
+  guildId: string
+  authorId: string
+  authorName: string
+  authorBot: boolean
+  timestamp: Date
+  url: string
+  filename: string
+  contentType?: string
+  size: number
+  /** Cached bytes when already available; the original URL remains canonical. */
+  data?: Buffer
+  /** True when data contains only the context-safe prefix of a larger file. */
+  truncated?: boolean
+}
+
 /**
  * Basic plugin context for tool execution
  */
@@ -90,6 +117,8 @@ export interface PluginContext {
   uploadFile?: (buffer: Buffer, filename: string, contentType: string, caption?: string) => Promise<string[]>  // Upload a file
   /** Images visible to the bot (from Discord context + MCP tool results), newest first */
   visibleImages?: VisibleImage[]
+  /** Discord attachments available for optional plugin-side archival. */
+  incomingAttachments?: IncomingAttachment[]
 }
 
 /**
@@ -188,4 +217,3 @@ export interface ContextInjection {
    */
   asSystem?: boolean
 }
-

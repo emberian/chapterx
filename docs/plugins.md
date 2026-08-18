@@ -119,6 +119,90 @@ plugin_config:
 
 ---
 
+### `workspace` - Persistent Personal Workspace
+
+Provides a durable filesystem the bot can organize freely, an automatic inbox
+for Discord image/text attachments, and an optional non-interactive shell.
+
+**Tools:**
+
+- `workspace_list` - Inspect a directory tree
+- `workspace_read` - Read bounded chunks of text files
+- `workspace_write` - Create, overwrite, or append UTF-8 files
+- `workspace_mkdir` - Create empty directories and parent hierarchies
+- `workspace_move` - Move or rename without overwriting
+- `workspace_trash` - Recoverably move an item into `.trash/`
+- `workspace_shell` - Run a bounded non-interactive command when enabled
+
+**Minimal configuration:**
+
+```yaml
+tool_plugins: ['notes', 'timer', 'workspace']
+plugin_config:
+  workspace:
+    root: /state/claude46
+    capture_attachments: true
+    allow_shell: false
+```
+
+The default root is `./workspace/{botId}`. For real deployments, configure an
+absolute path backed by a persistent volume. A web directory such as `htdocs/`
+can be mounted beneath that root if the bot should tend a site. On every
+activation, recent image and text attachments are copied idempotently to:
+
+```text
+inbox/YYYY-MM-DD/{messageId}/{attachmentId}-{filename}
+```
+
+Each item gets a metadata sidecar, and `inbox/index.jsonl` supplies a compact
+recent-arrivals context injection. Bot-authored attachments are ignored by
+default to avoid re-importing the bot's own output.
+
+**Shell configuration:**
+
+```yaml
+plugin_config:
+  workspace:
+    root: /home/claude
+    allow_shell: true
+    shell: /bin/sh
+    shell_args: ['-lc']
+    shell_timeout_ms: 15000
+    shell_max_output_chars: 64000
+    shell_env:
+      TZ: America/New_York
+```
+
+For Plan 9 `rc`, use `shell: /bin/rc` and `shell_args: ['-c']` if `rc` is
+installed in the runtime image.
+
+> **Security boundary:** File tools reject absolute paths, traversal, and
+> symlinks. The shell only sets its working directory to the workspace; that is
+> not an OS sandbox. It receives a scrubbed environment, but it can exercise the
+> bot process's filesystem and network permissions. Enable it only inside a
+> dedicated container/chroot/VM with the intended workspace and web directory
+> mounted. Keep Discord/API credentials outside that boundary where possible.
+> The separate `upload` plugin accepts arbitrary local paths and is therefore
+> intentionally omitted from the path-confined example configuration.
+
+Useful optional settings:
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `capture_all_attachments` | `false` | Archive non-image/non-text files too |
+| `capture_bot_attachments` | `false` | Include bot-authored attachments |
+| `max_inbox_file_bytes` | `26214400` | Per-inbox-item cap (hard cap 100 MB) |
+| `max_inbox_items_per_activation` | `8` | Bound archival work per activation |
+| `max_read_bytes` | `131072` | Per-call text read cap |
+| `max_write_bytes` | `1048576` | Per-call text write cap |
+| `max_list_entries` | `300` | Directory listing cap |
+| `inject_into_context` | `true` | Advertise continuity and recent arrivals |
+
+See [`config/autonomy-workspace.yaml.example`](../config/autonomy-workspace.yaml.example)
+for a ready-to-copy configuration fragment.
+
+---
+
 ## State Management
 
 Plugins can persist state with different scopes:
@@ -222,6 +306,7 @@ interface PluginStateContext {
   // Configuration
   configuredScope: StateScope  // From plugin_config
   pluginConfig?: Record<string, any>  // Full plugin config
+  incomingAttachments?: IncomingAttachment[]  // Discord attachment archive candidates
   
   // Inheritance info
   inheritanceInfo?: {
@@ -250,11 +335,12 @@ export const availablePlugins: Record<string, ToolPlugin> = {
 
 ## Context Injection Lifecycle
 
-1. **Collection**: Before LLM call, `getContextInjections()` is called on all plugins
-2. **Depth Calculation**: For injections with `lastModifiedAt`, current depth is calculated based on messages since modification
-3. **Aging**: New injections start at depth 0 and age toward `targetDepth`
-4. **Insertion**: Injections are inserted at calculated positions
-5. **Formatting**: Injections appear as `System>[plugin]: {content}` in context
+1. **Activation hook**: `onActivation()` runs for idempotent maintenance such as inbox capture
+2. **Collection**: Before LLM call, `getContextInjections()` is called on all plugins
+3. **Depth Calculation**: For injections with `lastModifiedAt`, current depth is calculated based on messages since modification
+4. **Aging**: New injections start at depth 0 and age toward `targetDepth`
+5. **Insertion**: Injections are inserted at calculated positions
+6. **Formatting**: Injections appear as `System>[plugin]: {content}` in context
 
 ---
 
@@ -265,5 +351,3 @@ export const availablePlugins: Record<string, ToolPlugin> = {
 3. **Use meaningful IDs**: Makes debugging and updates easier
 4. **Consider depth carefully**: Too shallow = noise, too deep = may be truncated
 5. **Test with traces**: Use the debug API to verify injection positions
-
-

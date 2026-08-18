@@ -34,7 +34,12 @@ tool_output_visible: false  # Show tool calls in Discord
 max_tool_depth: 100  # Max tool call iterations
 
 # Tool plugins (built-in tools)
-# tool_plugins: ['config']  # Enable config plugin for list_config and request_config_change tools
+# tool_plugins: ['config', 'workspace']  # Add workspace for a persistent filesystem/inbox
+# plugin_config:
+#   workspace:
+#     root: /state/claude  # Back this with a persistent volume
+#     capture_attachments: true
+#     allow_shell: false  # Enable only inside a dedicated container/chroot
 
 # MCP Servers (optional - configure multiple servers)
 # mcp_servers:
@@ -79,4 +84,3 @@ max_queued_replies: 1  # Max queued replies before dropping
 # This provides unified handling of prefill transforms, caching, and provider routing.
 # Requires the membrane npm package to be installed.
 # use_membrane: true
-
