@@ -1,10 +1,8 @@
 /**
- * Notes Plugin
- * 
- * Simple note-taking plugin that demonstrates:
- * - Channel-scoped persistent state
- * - Context injection with aging behavior
- * - Lifecycle hooks for updating injection depth
+ * Notes Plugin — index + retrieval architecture
+ *
+ * Injects a compact index (ID + first line) into context every turn.
+ * Full note content is retrieved on-demand via read_note.
  */
 
 import { ToolPlugin, PluginContext, PluginStateContext, ContextInjection } from './types.js'
@@ -22,14 +20,22 @@ interface NotesState {
   lastModifiedMessageId: string | null
 }
 
+/** First line of note content, truncated. The bot sees this in the index. */
+function noteTitle(content: string, maxLen = 100): string {
+  const firstLine = content.split('\n')[0] || content
+  if (firstLine.length <= maxLen) return firstLine
+  return firstLine.slice(0, maxLen) + '…'
+}
+
 const plugin: ToolPlugin = {
   name: 'notes',
-  description: 'Simple note-taking plugin with context injection',
-  
+  description: 'Notebook with persistent notes. Index is always visible; use read_note for full content.',
+
   tools: [
     {
       name: 'save_note',
-      description: 'Save a note. Notes are visible in the context and age toward a stable position.',
+      description:
+        'Save a note. The first line will appear in your notebook index; use it as a title.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -41,33 +47,28 @@ const plugin: ToolPlugin = {
         required: ['content'],
       },
       handler: async (input: { content: string }, context: PluginContext) => {
-        // Note: For actual state management, this would use PluginStateContext
-        // This handler just logs - real state updates happen in onToolExecution
-        logger.debug({ 
-          content: input.content.slice(0, 50),
-          channelId: context.channelId 
-        }, 'Note save requested')
-        
+        logger.debug(
+          { content: input.content.slice(0, 50), channelId: context.channelId },
+          'Note save requested'
+        )
         return `Note will be saved: "${input.content.slice(0, 50)}${input.content.length > 50 ? '...' : ''}"`
       },
     },
     {
       name: 'list_notes',
-      description: 'List all saved notes with their IDs and full content',
+      description: 'List all saved notes with their IDs and titles.',
       inputSchema: {
         type: 'object',
         properties: {},
       },
       handler: async (_input: any, context: PluginContext) => {
         logger.debug({ channelId: context.channelId }, 'Notes list requested')
-        // Note: Handler can't access state directly, but we return a message
-        // The actual notes are visible in context injection
-        return 'Notes are displayed in context above. Use read_note with an ID to retrieve a specific note.'
+        return 'Fetching notes index...'
       },
     },
     {
       name: 'read_note',
-      description: 'Read a specific note by ID or search by title/content',
+      description: 'Read the full content of a specific note by its ID.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -75,32 +76,41 @@ const plugin: ToolPlugin = {
             type: 'string',
             description: 'The note ID (e.g., note_abc123)',
           },
-          search: {
+        },
+        required: ['id'],
+      },
+      handler: async (input: { id: string }, context: PluginContext) => {
+        logger.debug(
+          { noteId: input.id, channelId: context.channelId },
+          'Note read requested'
+        )
+        return `Looking up note: ${input.id}`
+      },
+    },
+    {
+      name: 'search_notes',
+      description: 'Search notes by content. Returns matching note IDs and titles.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
             type: 'string',
-            description: 'Search term to find notes by title or content',
+            description: 'Search term to find in note contents',
           },
         },
+        required: ['query'],
       },
-      handler: async (input: { id?: string; search?: string }, context: PluginContext) => {
-        logger.debug({ 
-          noteId: input.id,
-          search: input.search,
-          channelId: context.channelId 
-        }, 'Note read requested')
-        
-        if (!input.id && !input.search) {
-          return 'Please provide either an id or search term'
-        }
-        
-        // Handler returns placeholder - actual retrieval happens in onToolExecution
-        return input.id 
-          ? `Looking up note: ${input.id}`
-          : `Searching notes for: ${input.search}`
+      handler: async (input: { query: string }, context: PluginContext) => {
+        logger.debug(
+          { query: input.query, channelId: context.channelId },
+          'Note search requested'
+        )
+        return `Searching notes for: ${input.query}`
       },
     },
     {
       name: 'delete_note',
-      description: 'Delete a note by ID',
+      description: 'Delete a note by ID.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -112,54 +122,61 @@ const plugin: ToolPlugin = {
         required: ['id'],
       },
       handler: async (input: { id: string }, context: PluginContext) => {
-        logger.debug({ 
-          noteId: input.id,
-          channelId: context.channelId 
-        }, 'Note delete requested')
-        
+        logger.debug(
+          { noteId: input.id, channelId: context.channelId },
+          'Note delete requested'
+        )
         return `Note ${input.id} will be deleted`
       },
     },
   ],
-  
+
   /**
-   * Get context injections - returns notes to be injected into context
+   * Inject a compact index every turn. The bot always knows what it has;
+   * it calls read_note when it needs the details.
    */
-  getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
-    // Check if injection is disabled via config (defaults to true)
-    const config = context.pluginConfig as { inject_into_context?: boolean } | undefined
+  getContextInjections: async (
+    context: PluginStateContext
+  ): Promise<ContextInjection[]> => {
+    const config = context.pluginConfig as
+      | { inject_into_context?: boolean }
+      | undefined
     if (config?.inject_into_context === false) {
       return []
     }
-    
-    // Use configured scope (defaults to 'channel')
+
     const scope = context.configuredScope
     const state = await context.getState<NotesState>(scope)
-    
+
     if (!state?.notes.length) {
       return []
     }
-    
-    // Format notes for display
-    const notesContent = [
-      '## 📝 Saved Notes',
+
+    const indexLines = state.notes.map(
+      (note, i) => `${i + 1}. [${note.id}] ${noteTitle(note.content)}`
+    )
+
+    const indexContent = [
+      `## 📝 Notebook (${state.notes.length} notes)`,
       '',
-      ...state.notes.map((note, i) => `${i + 1}. [${note.id}] ${note.content}`),
+      ...indexLines,
       '',
-      '_Use save_note/delete_note to manage notes._',
+      '_Use read_note to see full contents. Use save_note/delete_note to manage._',
     ].join('\n')
-    
-    return [{
-      id: 'notes-display',
-      content: notesContent,
-      targetDepth: 10,  // Settle near tool descriptions
-      lastModifiedAt: state.lastModifiedMessageId,
-      priority: 100,  // High priority - show before other injections
-    }]
+
+    return [
+      {
+        id: 'notes-display',
+        content: indexContent,
+        targetDepth: 10,
+        lastModifiedAt: state.lastModifiedMessageId,
+        priority: 100,
+      },
+    ]
   },
-  
+
   /**
-   * Lifecycle hook - called after tool execution to update state
+   * Persist state changes after save/delete.
    */
   onToolExecution: async (
     toolName: string,
@@ -167,13 +184,12 @@ const plugin: ToolPlugin = {
     _result: any,
     context: PluginStateContext
   ): Promise<void> => {
-    // Use configured scope (defaults to 'channel')
     const scope = context.configuredScope
-    const state = await context.getState<NotesState>(scope) || {
+    const state = (await context.getState<NotesState>(scope)) || {
       notes: [],
       lastModifiedMessageId: null,
     }
-    
+
     if (toolName === 'save_note') {
       const newNote: Note = {
         id: `note_${Date.now().toString(36)}`,
@@ -181,36 +197,34 @@ const plugin: ToolPlugin = {
         createdAt: new Date().toISOString(),
         createdByMessageId: context.currentMessageId,
       }
-      
+
       state.notes.push(newNote)
       state.lastModifiedMessageId = context.currentMessageId
-      
+
       await context.setState(scope, state)
-      logger.info({ 
-        noteId: newNote.id, 
-        channelId: context.channelId,
-        scope 
-      }, 'Note saved')
+      logger.info(
+        { noteId: newNote.id, channelId: context.channelId, scope },
+        'Note saved'
+      )
     }
-    
+
     if (toolName === 'delete_note') {
-      const noteIndex = state.notes.findIndex(n => n.id === input.id)
+      const noteIndex = state.notes.findIndex((n) => n.id === input.id)
       if (noteIndex >= 0) {
         state.notes.splice(noteIndex, 1)
         state.lastModifiedMessageId = context.currentMessageId
-        
+
         await context.setState(scope, state)
-        logger.info({ 
-          noteId: input.id, 
-          channelId: context.channelId,
-          scope 
-        }, 'Note deleted')
+        logger.info(
+          { noteId: input.id, channelId: context.channelId, scope },
+          'Note deleted'
+        )
       }
     }
   },
-  
+
   /**
-   * Post-process tool results to inject actual note content
+   * Replace handler placeholders with real data for read/search/list.
    */
   postProcessResult: async (
     toolName: string,
@@ -218,56 +232,58 @@ const plugin: ToolPlugin = {
     result: string,
     context: PluginStateContext
   ): Promise<string> => {
+    const scope = context.configuredScope
+    const state = await context.getState<NotesState>(scope)
+
     if (toolName === 'read_note') {
-      const scope = context.configuredScope
-      const state = await context.getState<NotesState>(scope)
-      
-      if (!state?.notes.length) {
-        return 'No notes saved yet.'
+      if (!state?.notes.length) return 'No notes saved yet.'
+
+      const note = state.notes.find((n) => n.id === input.id)
+      if (note) {
+        return `**[${note.id}]** (${note.createdAt}):\n\n${note.content}`
       }
-      
-      if (input.id) {
-        const note = state.notes.find(n => n.id === input.id)
-        if (note) {
-          return `**Note [${note.id}]** (created ${note.createdAt}):\n\n${note.content}`
-        }
-        return `Note not found: ${input.id}`
-      }
-      
-      if (input.search) {
-        const searchLower = input.search.toLowerCase()
-        const matches = state.notes.filter(n => 
-          n.content.toLowerCase().includes(searchLower)
-        )
-        
-        if (matches.length === 0) {
-          return `No notes found matching: "${input.search}"`
-        }
-        
-        if (matches.length === 1) {
-          const note = matches[0]!
-          return `**Note [${note.id}]** (created ${note.createdAt}):\n\n${note.content}`
-        }
-        
-        return `Found ${matches.length} notes matching "${input.search}":\n\n` +
-          matches.map(n => `- [${n.id}] ${n.content.slice(0, 100)}${n.content.length > 100 ? '...' : ''}`).join('\n')
-      }
-      
-      return result
+      return `Note not found: ${input.id}`
     }
-    
+
+    if (toolName === 'search_notes') {
+      if (!state?.notes.length) return 'No notes saved yet.'
+
+      const q = (input.query as string).toLowerCase()
+      const matches = state.notes.filter((n) =>
+        n.content.toLowerCase().includes(q)
+      )
+
+      if (matches.length === 0) {
+        return `No notes matching "${input.query}".`
+      }
+
+      // Single match: return full content directly
+      if (matches.length === 1) {
+        const note = matches[0]!
+        return `**[${note.id}]** (${note.createdAt}):\n\n${note.content}`
+      }
+
+      // Multiple matches: return index so bot can pick
+      return (
+        `${matches.length} notes matching "${input.query}":\n\n` +
+        matches
+          .map((n) => `- [${n.id}] ${noteTitle(n.content)}`)
+          .join('\n')
+      )
+    }
+
     if (toolName === 'list_notes') {
-      const scope = context.configuredScope
-      const state = await context.getState<NotesState>(scope)
-      
-      if (!state?.notes.length) {
-        return 'No notes saved yet. Use save_note to create one.'
-      }
-      
-      return `**${state.notes.length} notes:**\n\n` +
-        state.notes.map((n, i) => `${i + 1}. [${n.id}] ${n.content}`).join('\n\n')
+      if (!state?.notes.length) return 'No notes saved yet.'
+
+      return (
+        `**${state.notes.length} notes:**\n\n` +
+        state.notes
+          .map((n, i) => `${i + 1}. [${n.id}] ${noteTitle(n.content)}`)
+          .join('\n')
+      )
     }
-    
+
+    // save_note and delete_note: handler response is fine as-is
     return result
   },
 }

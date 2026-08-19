@@ -9,6 +9,7 @@ import sharp from 'sharp'
 export const MAX_IMAGE_BASE64_BYTES = 5 * 1024 * 1024
 // Anthropic's max image dimension — API rejects anything larger
 export const MAX_IMAGE_DIMENSION = 8000
+export const OPTIMAL_IMAGE_DIMENSION = 1568
 
 export interface ProcessedImage {
   data: Buffer
@@ -76,8 +77,8 @@ export async function resampleImage(
   // Start with original dimensions, clamped to API max
   let width = metadata.width || 1920
   let height = metadata.height || 1080
-  if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
-    const scale = MAX_IMAGE_DIMENSION / Math.max(width, height)
+  if (width > OPTIMAL_IMAGE_DIMENSION || height > OPTIMAL_IMAGE_DIMENSION) {
+    const scale = OPTIMAL_IMAGE_DIMENSION / Math.max(width, height)
     width = Math.floor(width * scale)
     height = Math.floor(height * scale)
   }
