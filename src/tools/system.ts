@@ -302,7 +302,9 @@ export class ToolSystem {
           
           // Truncate large results to prevent context bloat
           let result = entry.result.output
-          const resultStr = typeof result === 'string' ? result : JSON.stringify(result)
+          const resultStr = typeof result === 'string'
+            ? result
+            : JSON.stringify(result) ?? String(result)
           if (resultStr.length > 2000) {
             result = resultStr.substring(0, 2000) + '\n...[truncated]'
           }
@@ -322,6 +324,7 @@ export class ToolSystem {
             },
             result: {
               output: result,
+              error: entry.result.error,
               images: entry.result.images,  // Restore MCP images from cache
             }
           })
@@ -939,4 +942,3 @@ export class ToolSystem {
     }
   }
 }
-

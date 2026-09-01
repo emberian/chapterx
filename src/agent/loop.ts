@@ -2092,7 +2092,8 @@ export class AgentLoop {
         }
 
         // Combine text message IDs (already sent by inline execution) with image IDs
-        const allMessageIds = [...(inlineSentMessageIds ?? []), ...imageSentIds]
+        const textMessageIds = inlineSentMessageIds ?? []
+        const allMessageIds = [...new Set([...textMessageIds, ...imageSentIds])]
         const responseText = completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
@@ -2115,6 +2116,21 @@ export class AgentLoop {
             }
           }
           await this.activationStore.completeActivation(activation.id)
+        }
+
+        // This branch returns before normal response finalization below, so it
+        // must also attach liveness and reconstruction metadata to tool entries.
+        const coveredMessageIds = toolMode === 'native'
+          ? [...new Set(preambleMessageIds)]
+          : [...new Set(textMessageIds)]
+        if (toolCallIds.length > 0 && allMessageIds.length > 0) {
+          await this.toolSystem.updateBotMessageIds(
+            this.botId,
+            channelId,
+            toolCallIds,
+            allMessageIds,
+            coveredMessageIds
+          )
         }
 
         // Update state and trace for image response

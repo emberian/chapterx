@@ -50,4 +50,34 @@ describe('ToolSystem cache message coverage', () => {
     expect(cached?.call.botMessageIds).toEqual(['preamble', 'final-answer'])
     expect(cached?.call.coveredMessageIds).toEqual(['preamble'])
   })
+
+  it('restores persisted tool errors', async () => {
+    const cacheDirectory = mkdtempSync(join(tmpdir(), 'chapterx-tool-cache-'))
+    temporaryDirectories.push(cacheDirectory)
+    const toolSystem = new ToolSystem(cacheDirectory)
+    const call: ToolCall = {
+      id: 'call-error',
+      name: 'fetch',
+      input: {},
+      messageId: 'trigger',
+      timestamp: new Date('2026-09-01T12:00:00Z'),
+      originalCompletionText: 'Fetching.',
+      botMessageIds: ['response'],
+    }
+    const result: ToolResult = {
+      callId: call.id,
+      output: null,
+      error: 'connection failed',
+      timestamp: new Date('2026-09-01T12:00:01Z'),
+    }
+
+    await toolSystem.persistToolUse('bot', 'channel', call, result)
+    const [cached] = await toolSystem.loadCacheWithResults(
+      'bot',
+      'channel',
+      new Set(['response'])
+    )
+
+    expect(cached?.result.error).toBe('connection failed')
+  })
 })

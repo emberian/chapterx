@@ -22,7 +22,11 @@ import {
   extractModelConfig,
 } from './stages/finalize.js'
 import { applyLimits } from './stages/cache-and-limits.js'
-import { collectCoveredToolMessageIds, formatToolUseWithResults } from './stages/tool-interleave.js'
+import {
+  collectCoveredToolMessageIds,
+  formatToolUseWithResults,
+  interleaveToolMessages,
+} from './stages/tool-interleave.js'
 import { applyMentionFormat } from './stages/mentions.js'
 import {
   injectActivationCompletions,
@@ -781,6 +785,44 @@ describe('formatToolUseWithResults', () => {
     expect(toolResult.content).toHaveLength(2)
     expect(toolResult.content[0].type).toBe('text')
     expect(toolResult.content[1].type).toBe('image')
+  })
+
+  it('emits a shared completion once for several tool results', () => {
+    const sharedCall = {
+      messageId: 'trigger-msg',
+      originalCompletionText: '<function_calls>search and fetch</function_calls>',
+    }
+    const toolCache = [
+      {
+        call: makeToolCall({ ...sharedCall, name: 'search' }),
+        result: { output: 'found result' },
+      },
+      {
+        call: makeToolCall({ ...sharedCall, name: 'fetch' }),
+        result: { output: 'fetched page' },
+      },
+    ]
+
+    const formatted = formatToolUseWithResults(toolCache, 'TestBot')
+    expect(formatted.map(message => message.participant)).toEqual([
+      'TestBot',
+      'System<[search]',
+      'System<[fetch]',
+    ])
+
+    const trigger = makeParticipantMessage({ messageId: 'trigger-msg' })
+    expect(interleaveToolMessages([trigger], formatted)).toEqual([trigger, ...formatted])
+  })
+
+  it('restores cached tool errors as error text', () => {
+    const toolCache = [{
+      call: makeToolCall({ name: 'fetch' }),
+      result: { output: null, error: 'connection failed' },
+    }]
+
+    const result = formatToolUseWithResults(toolCache, 'TestBot')
+
+    expect(textOf(result[1])).toBe('Error executing fetch: connection failed')
   })
 
   it('handles non-string non-object results', () => {
