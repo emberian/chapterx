@@ -43,10 +43,18 @@ describe('AgentLoop active-channel event buffering', () => {
     expect(queue.isEmpty()).toBe(true)
     expect((loop as any).pendingChannelEvents.get('channel')).toEqual([event])
 
+    const newerEvent: Event = {
+      ...event,
+      channelId: 'other-channel',
+      data: { id: 'newer-message' },
+    }
+    queue.push(newerEvent)
+
     ;(loop as any).completeChannelActivation('channel')
 
     expect((loop as any).activeChannels.has('channel')).toBe(false)
     expect((loop as any).pendingChannelEvents.has('channel')).toBe(false)
     expect(queue.pollBatch()).toEqual([event])
+    expect(queue.pollBatch()).toEqual([newerEvent])
   })
 })

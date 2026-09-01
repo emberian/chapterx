@@ -49,4 +49,17 @@ describe('EventQueue channel isolation', () => {
     expect(queue.pollBatch()).toEqual([first])
     expect(queue.pollBatch()).toEqual([second])
   })
+
+  it('prepends a deferred batch without reversing it', () => {
+    const queue = new EventQueue()
+    const deferredFirst = makeEvent('message', 'channel-a', 'deferred-first')
+    const deferredSecond = makeEvent('reaction', 'channel-a', 'deferred-second')
+    const newer = makeEvent('message', 'channel-b', 'newer')
+    queue.push(newer)
+
+    queue.prepend([deferredFirst, deferredSecond])
+
+    expect(queue.pollBatch()).toEqual([deferredFirst, deferredSecond])
+    expect(queue.pollBatch()).toEqual([newer])
+  })
 })

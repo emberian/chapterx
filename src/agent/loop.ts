@@ -777,9 +777,9 @@ export class AgentLoop {
     if (!pending || pending.length === 0) return
 
     this.pendingChannelEvents.delete(channelId)
-    for (const event of pending) {
-      this.queue.push(event)
-    }
+    // These events were polled before anything still in the shared queue, so
+    // restore them at the front to preserve arrival order.
+    this.queue.prepend(pending)
     logger.debug({ channelId, pendingEventCount: pending.length }, 'Requeued deferred channel events')
   }
   

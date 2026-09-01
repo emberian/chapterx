@@ -16,6 +16,14 @@ export class EventQueue {
   }
 
   /**
+   * Restore an older batch ahead of events that arrived after it was polled.
+   */
+  prepend(events: Event[]): void {
+    if (events.length === 0) return
+    this.queue.unshift(...events)
+  }
+
+  /**
    * Poll a batch of events
    * Returns consecutive events for one channel and the same type category.
    * AgentLoop processes a batch using its first event's channel and guild, so
