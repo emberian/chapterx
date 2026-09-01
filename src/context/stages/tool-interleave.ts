@@ -7,8 +7,69 @@ import type {
   ContentBlock,
   ImageContent,
   ToolCall,
+  DiscordMessage,
 } from '../../types.js'
 import { logger } from '../../utils/logger.js'
+
+/** Normalize visible Discord text for legacy tool-cache coverage inference. */
+function normalizeVisibleToolText(text: string): string {
+  return text
+    .replace(/^\s*<reply:@[^>]+>\s*/, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
+    .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')
+    .replace(/<function_results>[\s\S]*?<\/function_results>/g, '')
+    .replace(/System:\s*<results>[\s\S]*?<\/results>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Find Discord messages that are genuinely reconstructed by cached tool-call
+ * completion text.
+ *
+ * New cache entries state this explicitly via coveredMessageIds. For older
+ * entries, infer conservatively by checking that the visible Discord text is
+ * actually present in originalCompletionText. This repairs old native-tool
+ * entries that incorrectly marked their post-tool final answer as covered even
+ * though the cache retained only the pre-tool preamble.
+ */
+export function collectCoveredToolMessageIds(
+  toolCacheWithResults: Array<{ call: ToolCall; result: any }>,
+  discordMessages: DiscordMessage[]
+): Set<string> {
+  const covered = new Set<string>()
+  const messagesById = new Map(discordMessages.map(message => [message.id, message]))
+
+  for (const entry of toolCacheWithResults) {
+    // interleaveToolMessages inserts cached exchanges after their triggering
+    // message. If that anchor was deleted, filtered, or fell outside the current
+    // history window, suppressing the surviving Discord response would lose it.
+    if (!messagesById.has(entry.call.messageId)) continue
+
+    const explicitIds = entry.call.coveredMessageIds
+    if (explicitIds !== undefined) {
+      const botMessageIds = new Set(entry.call.botMessageIds || [])
+      for (const id of explicitIds) {
+        if (botMessageIds.has(id) && messagesById.has(id)) covered.add(id)
+      }
+      continue
+    }
+
+    const completionText = normalizeVisibleToolText(entry.call.originalCompletionText || '')
+    if (!completionText) continue
+
+    for (const id of entry.call.botMessageIds || []) {
+      const message = messagesById.get(id)
+      if (!message) continue
+      const visibleText = normalizeVisibleToolText(message.content || '')
+      if (visibleText && completionText.includes(visibleText)) {
+        covered.add(id)
+      }
+    }
+  }
+
+  return covered
+}
 
 /**
  * Format tool cache entries as paired bot-completion + system-result messages.

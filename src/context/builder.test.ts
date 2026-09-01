@@ -22,7 +22,7 @@ import {
   extractModelConfig,
 } from './stages/finalize.js'
 import { applyLimits } from './stages/cache-and-limits.js'
-import { formatToolUseWithResults } from './stages/tool-interleave.js'
+import { collectCoveredToolMessageIds, formatToolUseWithResults } from './stages/tool-interleave.js'
 import { applyMentionFormat } from './stages/mentions.js'
 import {
   injectActivationCompletions,
@@ -661,6 +661,76 @@ describe('mergeConsecutiveParticipantMessages', () => {
   it('returns empty array for empty input', () => {
     const result = mergeConsecutiveParticipantMessages([])
     expect(result).toHaveLength(0)
+  })
+})
+
+// ============================================================================
+// Unit tests: collectCoveredToolMessageIds
+// ============================================================================
+
+describe('collectCoveredToolMessageIds', () => {
+  it('keeps a legacy native-tool final answer when only the preamble was cached', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'msg-trigger', content: 'respond and save the note' }),
+      makeDiscordMessage({ id: 'preamble', content: '<reply:@rat> Let me save that note first.' }),
+      makeDiscordMessage({ id: 'final', content: 'rat — malformed thoughts becoming bird flu.' }),
+    ]
+    const toolCache = [{
+      call: makeToolCall({
+        originalCompletionText: 'Let me save that note first.',
+        botMessageIds: ['preamble', 'final'],
+      }),
+      result: 'saved',
+    }]
+
+    expect([...collectCoveredToolMessageIds(toolCache, messages)]).toEqual(['preamble'])
+  })
+
+  it('uses explicit coverage, including an intentionally empty subset', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'trigger', content: 'please save this' }),
+      makeDiscordMessage({ id: 'preamble', content: 'preamble' }),
+      makeDiscordMessage({ id: 'final', content: 'final answer' }),
+    ]
+    const explicit = [{
+      call: makeToolCall({
+        messageId: 'trigger',
+        originalCompletionText: 'different text',
+        botMessageIds: ['preamble', 'final'],
+        coveredMessageIds: ['preamble'],
+      }),
+      result: 'saved',
+    }]
+    const empty = [{
+      call: makeToolCall({
+        messageId: 'trigger',
+        originalCompletionText: 'preamble final answer',
+        botMessageIds: ['preamble', 'final'],
+        coveredMessageIds: [],
+      }),
+      result: 'saved',
+    }]
+
+    expect([...collectCoveredToolMessageIds(explicit, messages)]).toEqual(['preamble'])
+    expect([...collectCoveredToolMessageIds(empty, messages)]).toEqual([])
+  })
+
+  it('keeps covered Discord text when the cache insertion anchor is absent', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'preamble', content: 'preamble' }),
+      makeDiscordMessage({ id: 'final', content: 'final answer' }),
+    ]
+    const toolCache = [{
+      call: makeToolCall({
+        messageId: 'deleted-trigger',
+        originalCompletionText: 'preamble',
+        botMessageIds: ['preamble', 'final'],
+        coveredMessageIds: ['preamble'],
+      }),
+      result: 'saved',
+    }]
+
+    expect([...collectCoveredToolMessageIds(toolCache, messages)]).toEqual([])
   })
 })
 

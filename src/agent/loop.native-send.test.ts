@@ -53,12 +53,12 @@ describe('AgentLoop native-tool sending', () => {
         await callbacks.onPreToolContent('First preamble. ')
         await callbacks.onToolCalls(
           [{ id: 'tool-1', name: 'lookup', input: { q: 'one' } }],
-          { depth: 0, accumulated: 'First preamble. ' },
+          { depth: 0, preamble: 'First preamble. ', accumulated: 'First preamble. ' },
         )
         await callbacks.onPreToolContent('Second preamble. ')
         await callbacks.onToolCalls(
           [{ id: 'tool-2', name: 'lookup', input: { q: 'two' } }],
-          { depth: 1, accumulated: 'First preamble. Second preamble. ' },
+          { depth: 1, preamble: 'Second preamble. ', accumulated: 'First preamble. Second preamble. ' },
         )
 
         // Membrane returns every text block from the complete native tool loop,
@@ -96,6 +96,12 @@ describe('AgentLoop native-tool sending', () => {
     ])
     expect(result.completion.content).toEqual([
       { type: 'text', text: 'First preamble. Second preamble. Final answer.' },
+    ])
+    expect(result.preambleMessageIds).toEqual(['sent-1', 'sent-2'])
+    expect(result.sentMessageIds).toEqual(['sent-1', 'sent-2', 'sent-3'])
+    expect((harness.loop as any).toolSystem.persistToolUse.mock.calls.map((call: any[]) => call[2].originalCompletionText)).toEqual([
+      'First preamble. ',
+      'Second preamble. ',
     ])
   })
 })

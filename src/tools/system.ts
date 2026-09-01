@@ -316,6 +316,9 @@ export class ToolSystem {
               timestamp: new Date(entry.timestamp),
               originalCompletionText: entry.call.originalCompletionText || '',
               botMessageIds: botMsgIds,
+              coveredMessageIds: Array.isArray(entry.call.coveredMessageIds)
+                ? entry.call.coveredMessageIds
+                : undefined,
             },
             result: {
               output: result,
@@ -722,6 +725,7 @@ export class ToolSystem {
         messageId: call.messageId,
         originalCompletionText: call.originalCompletionText,
         botMessageIds: call.botMessageIds,  // May be undefined, will be updated later
+        coveredMessageIds: call.coveredMessageIds,  // May be undefined, will be updated later
       },
       result: {
         output: result.output,
@@ -740,14 +744,15 @@ export class ToolSystem {
   }
 
   /**
-   * Update tool cache entries with bot message IDs
-   * Called after activation completes and we know which Discord messages were sent
+   * Update tool cache entries with liveness anchors and the subset of Discord
+   * messages whose visible text is reconstructed by originalCompletionText.
    */
   async updateBotMessageIds(
     botId: string,
     channelId: string,
     toolCallIds: string[],
-    botMessageIds: string[]
+    botMessageIds: string[],
+    coveredMessageIds: string[] = botMessageIds
   ): Promise<void> {
     if (toolCallIds.length === 0 || botMessageIds.length === 0) return
     
@@ -766,10 +771,20 @@ export class ToolSystem {
       const updatedLines = lines.map(line => {
         try {
           const entry = JSON.parse(line)
-          if (toolCallIds.includes(entry.call?.id) && !entry.call?.botMessageIds) {
-            entry.call.botMessageIds = botMessageIds
-            modified = true
-            return JSON.stringify(entry)
+          if (toolCallIds.includes(entry.call?.id)) {
+            let changed = false
+            if (!entry.call?.botMessageIds) {
+              entry.call.botMessageIds = botMessageIds
+              changed = true
+            }
+            if (!Array.isArray(entry.call?.coveredMessageIds)) {
+              entry.call.coveredMessageIds = coveredMessageIds
+              changed = true
+            }
+            if (changed) {
+              modified = true
+              return JSON.stringify(entry)
+            }
           }
           return line
         } catch {

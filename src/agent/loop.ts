@@ -9,6 +9,7 @@ import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector, type PinnedSteer } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
+import { collectCoveredToolMessageIds } from '../context/stages/tool-interleave.js'
 import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
@@ -1775,16 +1776,14 @@ export class AgentLoop {
         }, 'Updated visible images with cached MCP results')
       }
       
-      // 4c. Filter out Discord messages that are in tool cache's botMessageIds
+      // 4c. Filter only Discord messages whose text the tool cache reconstructs
       // ONLY when preserve_thinking_context is DISABLED
       // When enabled, the activation store handles full completions and needs the original messages
       if (!config.preserve_thinking_context) {
-        const toolCacheBotMessageIds = new Set<string>()
-        for (const entry of toolCacheForContext) {
-          if (entry.call.botMessageIds) {
-            entry.call.botMessageIds.forEach(id => toolCacheBotMessageIds.add(id))
-          }
-        }
+        const toolCacheBotMessageIds = collectCoveredToolMessageIds(
+          toolCacheForContext,
+          discordContext.messages
+        )
         
         if (toolCacheBotMessageIds.size > 0) {
           const beforeFilter = discordContext.messages.length
@@ -2206,11 +2205,21 @@ export class AgentLoop {
         await this.activationStore.completeActivation(activation.id)
       }
       
-      // Update tool cache entries with bot message IDs (for existence checking on reload)
-      // Include both preamble message IDs and final response message IDs
-      const allBotMessageIds = [...preambleMessageIds, ...sentMessageIds]
+      // Keep all emitted messages as liveness anchors, but only suppress Discord
+      // messages that the cached completion actually reconstructs. Native tool
+      // entries retain per-round preambles, not their post-tool final answer.
+      const allBotMessageIds = [...new Set(sentMessageIds)]
+      const coveredMessageIds = toolMode === 'native'
+        ? [...new Set(preambleMessageIds)]
+        : allBotMessageIds
       if (toolCallIds.length > 0 && allBotMessageIds.length > 0) {
-        await this.toolSystem.updateBotMessageIds(this.botId, channelId, toolCallIds, allBotMessageIds)
+        await this.toolSystem.updateBotMessageIds(
+          this.botId,
+          channelId,
+          toolCallIds,
+          allBotMessageIds,
+          coveredMessageIds
+        )
       }
 
       // 9. Update state
@@ -2501,6 +2510,7 @@ export class AgentLoop {
   }> {
     const allToolCallIds: string[] = []
     const allSentMessageIds: string[] = []
+    const allPreambleMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     let accumulatedPreToolText = ''
@@ -2599,6 +2609,7 @@ export class AgentLoop {
             )
             markdownCarry = sendResult.endCarry
             allSentMessageIds.push(...sendResult.sentMessageIds)
+            allPreambleMessageIds.push(...sendResult.sentMessageIds)
             for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
               messageContexts[msgId] = ctx
             }
@@ -2627,7 +2638,10 @@ export class AgentLoop {
               input: call.input as Record<string, any>,
               messageId: triggeringMessageId,
               timestamp: new Date(),
-              originalCompletionText: context.accumulated || '',
+              // Membrane's accumulated field contains prose from every native
+              // tool round. Cache only this round's preamble or later context
+              // reconstruction repeats earlier prose.
+              originalCompletionText: context.preamble || '',
             }
 
             const toolResult = await this.toolSystem.executeTool(cxCall)
@@ -2881,7 +2895,7 @@ export class AgentLoop {
           raw: result?.raw ?? null,
         },
         toolCallIds: allToolCallIds,
-        preambleMessageIds: [],
+        preambleMessageIds: allPreambleMessageIds,
         fullCompletionText: completionText,
         sentMessageIds: allSentMessageIds,
         messageContexts,
@@ -2913,7 +2927,7 @@ export class AgentLoop {
             model: 'interrupted',
           },
           toolCallIds: allToolCallIds,
-          preambleMessageIds: [],
+          preambleMessageIds: allPreambleMessageIds,
           fullCompletionText: ttsCtx.interruptedText,
           sentMessageIds: allSentMessageIds,
           messageContexts,
